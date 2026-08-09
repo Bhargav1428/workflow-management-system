@@ -1,18 +1,17 @@
 import {
-  createClient,
   createCustomClient,
-  withAdminSession
+  withAdminSessionMiddleware
 } from '@nhost/nhost-js'
-
 const nhost = createCustomClient({
   subdomain: process.env.NHOST_SUBDOMAIN,
   region: process.env.NHOST_REGION,
   chainFunctions: [
-    withAdminSession({
+    withAdminSessionMiddleware({
       adminSecret: process.env.NHOST_ADMIN_SECRET
     })
   ]
 })
+  
 
 export default async (req, res) => {
   try {
