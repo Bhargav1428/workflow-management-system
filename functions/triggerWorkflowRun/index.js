@@ -23,15 +23,18 @@ export default async (req, res) => {
       })
     }
 
-    // 1. Verify workflow and get its first step
+    // 1. Get workflow
     const workflowQuery = `
       query GetWorkflow($id: uuid!) {
-        workflows_by_pk(id: $id) {
+        workflows(
+          where: { id: { _eq: $id } }
+          limit: 1
+        ) {
           id
           org_id
           name
           description
-          steps(order_by: {position: asc}) {
+          steps(order_by: { position: asc }) {
             id
             position
             type
@@ -46,7 +49,8 @@ export default async (req, res) => {
       variables: { id: workflow_id }
     })
 
-    const workflow = workflowResponse.body?.data?.workflows_by_pk
+    const workflow =
+      workflowResponse.body?.data?.workflows?.[0]
 
     if (!workflow) {
       return res.status(404).json({
@@ -57,8 +61,11 @@ export default async (req, res) => {
 
     // 2. Check organization quota
     const orgQuery = `
-      query GetOrg($id: uuid!) {
-        organizations_by_pk(id: $id) {
+      query GetOrganization($id: uuid!) {
+        organizations(
+          where: { id: { _eq: $id } }
+          limit: 1
+        ) {
           id
           calls_used
           calls_allowed
@@ -71,7 +78,8 @@ export default async (req, res) => {
       variables: { id: workflow.org_id }
     })
 
-    const org = orgResponse.body?.data?.organizations_by_pk
+    const org =
+      orgResponse.body?.data?.organizations?.[0]
 
     if (!org) {
       return res.status(404).json({
@@ -94,31 +102,37 @@ export default async (req, res) => {
           object: {
             workflow_id: $workflowId
             status: "running"
+            completed_at: null
+            error: ""
           }
         ) {
           id
           workflow_id
           status
           started_at
+          completed_at
+          error
         }
       }
     `
 
     const runResponse = await nhost.graphql.request({
       query: runMutation,
-      variables: { workflowId: workflow_id }
+      variables: {
+        workflowId: workflow_id
+      }
     })
 
-    const run = runResponse.body?.data?.insert_workflow_runs_one
+    const run =
+      runResponse.body?.data?.insert_workflow_runs_one
 
     if (!run) {
-      return res.status(500).json({
-        success: false,
-        message: 'Failed to create workflow run'
-      })
+      throw new Error(
+        'Failed to create workflow run'
+      )
     }
 
-    // 4. Create step run for the first workflow step
+    // 4. Get first workflow step
     const firstStep = workflow.steps?.[0]
 
     if (!firstStep) {
@@ -129,9 +143,12 @@ export default async (req, res) => {
     }
 
     // Your database currently requires these fields.
-    const approvedBy = 'a2b8678d-7ee6-4980-a3a5-e6b7e7890b45'
+    const approvedBy =
+      'a2b8678d-7ee6-4980-a3a5-e6b7e7890b45'
+
     const approvedAt = run.started_at
 
+    // 5. Create step run
     const stepRunMutation = `
       mutation CreateStepRun(
         $workflowRunId: uuid!
@@ -166,28 +183,27 @@ export default async (req, res) => {
       }
     `
 
-    const stepRunResponse = await nhost.graphql.request({
-      query: stepRunMutation,
-      variables: {
-        workflowRunId: run.id,
-        workflowStepId: firstStep.id,
-        approvedBy,
-        approvedAt
-      }
-    })
+    const stepRunResponse =
+      await nhost.graphql.request({
+        query: stepRunMutation,
+        variables: {
+          workflowRunId: run.id,
+          workflowStepId: firstStep.id,
+          approvedBy,
+          approvedAt
+        }
+      })
 
     const stepRun =
       stepRunResponse.body?.data?.insert_step_runs_one
 
     if (!stepRun) {
-      return res.status(500).json({
-        success: false,
-        message: 'Workflow run created but step run creation failed',
-        workflow_run_id: run.id
-      })
+      throw new Error(
+        'Workflow run created but step run creation failed'
+      )
     }
 
-    // 5. Return execution information
+    // 6. Return result
     return res.status(200).json({
       success: true,
       message: 'Workflow run started',
