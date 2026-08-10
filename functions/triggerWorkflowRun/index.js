@@ -1,16 +1,8 @@
-import {
-  createCustomClient,
-  withAdminSessionMiddleware
-} from '@nhost/nhost-js'
+import { createClient } from '@nhost/nhost-js'
 
-const nhost = createCustomClient({
+const nhost = createClient({
   subdomain: process.env.NHOST_SUBDOMAIN,
-  region: process.env.NHOST_REGION,
-  chainFunctions: [
-    withAdminSessionMiddleware({
-      adminSecret: process.env.NHOST_ADMIN_SECRET
-    })
-  ]
+  region: process.env.NHOST_REGION
 })
 
 export default async (req, res) => {
@@ -31,23 +23,79 @@ export default async (req, res) => {
       })
     }
 
-    // Known workflow from the project
-    const workflow = {
-      id: workflow_id,
-      org_id: '69a72eae-3c95-4417-b837-c3b9b9a2c941',
-      name: 'Demo Workflow',
-      description: 'Test workflow for project submission',
-      steps: [
-        {
-          id: 'c71f360c-9f62-446b-aee5-6232e891bf96',
-          position: 1,
-          type: 'action',
-          config: {}
+    // 1. Get workflow
+    const workflowQuery = `
+      query GetWorkflow($id: uuid!) {
+        workflows(
+          where: { id: { _eq: $id } }
+          limit: 1
+        ) {
+          id
+          org_id
+          name
+          description
+          steps(order_by: { position: asc }) {
+            id
+            position
+            type
+            config
+          }
         }
-      ]
+      }
+    `
+
+    const workflowResponse = await nhost.graphql.request({
+      query: workflowQuery,
+      variables: { id: workflow_id }
+    })
+
+    const workflow =
+      workflowResponse.body?.data?.workflows?.[0]
+
+    if (!workflow) {
+      return res.status(404).json({
+        success: false,
+        message: 'Workflow not found'
+      })
     }
 
-    // Create workflow run
+    // 2. Check organization quota
+    const orgQuery = `
+      query GetOrganization($id: uuid!) {
+        organizations(
+          where: { id: { _eq: $id } }
+          limit: 1
+        ) {
+          id
+          calls_used
+          calls_allowed
+        }
+      }
+    `
+
+    const orgResponse = await nhost.graphql.request({
+      query: orgQuery,
+      variables: { id: workflow.org_id }
+    })
+
+    const org =
+      orgResponse.body?.data?.organizations?.[0]
+
+    if (!org) {
+      return res.status(404).json({
+        success: false,
+        message: 'Organization not found'
+      })
+    }
+
+    if (org.calls_used >= org.calls_allowed) {
+      return res.status(429).json({
+        success: false,
+        message: 'Organization quota exhausted'
+      })
+    }
+
+    // 3. Create workflow run
     const runMutation = `
       mutation CreateRun($workflowId: uuid!) {
         insert_workflow_runs_one(
@@ -75,27 +123,32 @@ export default async (req, res) => {
       }
     })
 
-    if (runResponse.body?.errors?.length) {
-      throw new Error(runResponse.body.errors[0].message)
-    }
-
     const run =
       runResponse.body?.data?.insert_workflow_runs_one
 
     if (!run) {
-      throw new Error('Failed to create workflow run')
+      throw new Error(
+        'Failed to create workflow run'
+      )
     }
 
-    // First workflow step
-    const firstStep = workflow.steps[0]
+    // 4. Get first workflow step
+    const firstStep = workflow.steps?.[0]
 
-    // Existing test user from the project
+    if (!firstStep) {
+      return res.status(400).json({
+        success: false,
+        message: 'Workflow has no steps'
+      })
+    }
+
+    // Your database currently requires these fields.
     const approvedBy =
       'a2b8678d-7ee6-4980-a3a5-e6b7e7890b45'
 
     const approvedAt = run.started_at
 
-    // Create step run
+    // 5. Create step run
     const stepRunMutation = `
       mutation CreateStepRun(
         $workflowRunId: uuid!
@@ -141,12 +194,6 @@ export default async (req, res) => {
         }
       })
 
-    if (stepRunResponse.body?.errors?.length) {
-      throw new Error(
-        stepRunResponse.body.errors[0].message
-      )
-    }
-
     const stepRun =
       stepRunResponse.body?.data?.insert_step_runs_one
 
@@ -156,6 +203,7 @@ export default async (req, res) => {
       )
     }
 
+    // 6. Return result
     return res.status(200).json({
       success: true,
       message: 'Workflow run started',
